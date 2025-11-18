@@ -1,0 +1,301 @@
+# === 1. Librerías ===
+import pandas as pd
+import numpy as np
+import seaborn as sns
+from xgboost.callback import EarlyStopping as XGBEarlyStopping 
+from sklearn.model_selection import train_test_split, RandomizedSearchCV 
+from sklearn.preprocessing import StandardScaler 
+from sklearn.metrics import ( classification_report, confusion_matrix, roc_curve, auc, RocCurveDisplay ) 
+from sklearn.ensemble import VotingClassifier 
+from lightgbm import early_stopping,log_evaluation 
+from lightgbm import LGBMClassifier 
+from xgboost import XGBClassifier 
+from catboost import CatBoostClassifier 
+from xgboost.callback import EarlyStopping 
+import warnings 
+import json 
+import matplotlib.pyplot as plt 
+from itertools import product 
+import joblib 
+from sklearn.metrics import f1_score, precision_score, recall_score 
+import logging 
+import os 
+os.environ["OMP_NUM_THREADS"] = "30" 
+os.environ["OPENBLAS_NUM_THREADS"] = "30" 
+os.environ["MKL_NUM_THREADS"] = "30" 
+os.environ["VECLIB_MAXIMUM_THREADS"] = "30" 
+os.environ["NUMEXPR_NUM_THREADS"] = "30" 
+import logging 
+from logging.handlers import RotatingFileHandler 
+from pathlib import Path 
+import time
+
+
+
+# Logger principal del pipeline (mensajes generales de orquestación) 
+muestra=30 
+# === Carpeta y archivo de log === 
+LOG_DIR = Path("logs") 
+LOG_DIR.mkdir(exist_ok=True) 
+LOG_FILE = LOG_DIR / f"pipeline_swgo_{muestra}.log" 
+
+
+
+# === Configuración del logger raíz === 
+def crear_logger(nombre, archivo): 
+    logger_model = logging.getLogger(nombre) 
+    logger_model.setLevel(logging.INFO) 
+    handler_file = RotatingFileHandler(LOG_DIR / archivo, maxBytes=5_000_000, backupCount=3) 
+    handler_console = logging.StreamHandler() 
+    formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S') 
+    handler_file.setFormatter(formatter) 
+    handler_console.setFormatter(formatter) 
+    logger_model.addHandler(handler_file) 
+    logger_model.addHandler(handler_console) 
+    logger_model.propagate = False # evitar duplicados 
+    return logger_model 
+logger_lgbm = crear_logger("LightGBM", f"pipeline_lightgbm_{muestra}.log") 
+logger_xgb = crear_logger("XGBoost", f"pipeline_xgboost_{muestra}.log") 
+logger_cat = crear_logger("CatBoost", f"pipeline_catboost_{muestra}.log") 
+logger_voting = crear_logger("Voting", f"pipeline_voting_{muestra}.log") 
+logger = crear_logger("MAIN", f"pipeline_main_{muestra}.log") 
+warnings.filterwarnings('ignore') 
+def graficar_tpr_vs_energia(bin_centers, tpr_list, nombre_modelo, carpeta, caso, version): 
+    plt.figure(figsize=(8, 5)) 
+    plt.plot(bin_centers, tpr_list, marker='o', color='green', label='TPR (gamma)') 
+    plt.xlabel("rec.LHLatDistFitEnergy (log10(E/GeV))") 
+    plt.ylabel("TPR") 
+    plt.title(f"TPR vs Energía reconstruida - {nombre_modelo}") 
+    plt.grid(True) 
+    plt.legend() 
+    plt.tight_layout() 
+    plt.savefig(f"{carpeta}/TPR_vs_Energia_{nombre_modelo}_{caso}_{version}.png", dpi=600) 
+    plt.close() 
+    
+def graficar_fpr_vs_energia(bin_centers, fpr_list, nombre_modelo, carpeta, caso, version): 
+    plt.figure(figsize=(8, 5)) 
+    plt.plot(bin_centers, fpr_list, marker='s', color='red', label='FPR (proton)') 
+    plt.xlabel("rec.LHLatDistFitEnergy (log10(E/GeV))") 
+    plt.ylabel("FPR") 
+    plt.title(f"FPR vs Energía reconstruida - {nombre_modelo}") 
+    plt.grid(True) 
+    plt.legend() 
+    plt.tight_layout() 
+    plt.savefig(f"{carpeta}/FPR_vs_Energia_{nombre_modelo}_{caso}_{version}.png", dpi=600) 
+    plt.close() 
+def graficar_q_vs_energia(bin_centers, q_list, nombre_modelo, carpeta, caso, version): 
+    plt.figure(figsize=(8, 5)) 
+    plt.plot(bin_centers, q_list, marker='d', color='blue', label='Q-factor') 
+    plt.xlabel("rec.LHLatDistFitEnergy (log10(E/GeV))") 
+    plt.ylabel("Q = TPR / √FPR") 
+    plt.title(f"Q vs Energía reconstruida - {nombre_modelo}") 
+    plt.grid(True)
+    plt.legend() 
+    plt.tight_layout() 
+    plt.savefig(f"{carpeta}/Q_vs_Energia_{nombre_modelo}_{caso}_{version}.png", dpi=600) 
+    plt.close() 
+def encontrar_umbral_min_fpr(y_true, y_proba, tpr_objetivo=0.80, n_points=400, thr_min=0.001, thr_max=1.0): 
+    thresholds = np.linspace(thr_min, thr_max, n_points) 
+    # Expandimos el eje de y_proba para broadcasting 
+    y_proba_exp = y_proba[:, np.newaxis] # shape: (N, 1) 
+    thresholds_exp = thresholds[np.newaxis, :] # shape: (1, T) 
+    # Predicciones binarias para todos los thresholds a la vez 
+    y_pred_all = (y_proba_exp >= thresholds_exp).astype(int) # shape: (N, T) 
+    # Repetimos y_true para cada columna (threshold) 
+    y_true_rep = np.tile(y_true[:, np.newaxis], (1, n_points)) # shape: (N, T) 
+    # TP, FN, FP, TN para cada threshold 
+    TP = np.sum((y_true_rep == 1) & (y_pred_all == 1), axis=0) 
+    FN = np.sum((y_true_rep == 1) & (y_pred_all == 0), axis=0) 
+    FP = np.sum((y_true_rep == 0) & (y_pred_all == 1), axis=0) 
+    TN = np.sum((y_true_rep == 0) & (y_pred_all == 0), axis=0) 
+    TPR = TP / (TP + FN + 1e-10) 
+    FPR = FP / (FP + TN + 1e-10) 
+    Q = TPR / (np.sqrt(FPR) + 1e-10) 
+
+    # Filtro de thresholds que cumplen con TPR mínimo 
+    valid = TPR >= tpr_objetivo 
+    if not np.any(valid): 
+        return None 
+    # Obtener índices válidos 
+    valid_indices = np.where(valid)[0] 
+    # Seleccionar el mejor según menor FPR (y mayor TPR si hay empate) 
+    best_idx = valid_indices[np.lexsort(( -TPR[valid], FPR[valid]))][0] 
+    return { 'threshold': thresholds[best_idx], 'TPR': float(TPR[best_idx]), 'FPR': float(FPR[best_idx]), 'Q': float(Q[best_idx]) } 
+
+def encontrar_umbral_max_q(y_true, y_proba, tpr_min=0.5, n_points=400, thr_min=0.001, thr_max=1.0): 
+    thresholds = np.linspace(thr_min, thr_max, n_points) 
+    y_proba_exp = y_proba[:, np.newaxis] 
+    thresholds_exp = thresholds[np.newaxis, :] 
+    y_pred_all = (y_proba_exp >= thresholds_exp).astype(int) 
+    y_true_rep = np.tile(y_true[:, np.newaxis], (1, n_points)) 
+    TP = np.sum((y_true_rep == 1) & (y_pred_all == 1), axis=0) 
+    FN = np.sum((y_true_rep == 1) & (y_pred_all == 0), axis=0) 
+    FP = np.sum((y_true_rep == 0) & (y_pred_all == 1), axis=0) 
+    TN = np.sum((y_true_rep == 0) & (y_pred_all == 0), axis=0) 
+    TPR = TP / (TP + FN + 1e-10) 
+    FPR = FP / (FP + TN + 1e-10) 
+    Q = TPR / (np.sqrt(FPR) + 1e-10) 
+    
+    # Filtrar por condición TPR >= tpr_min 
+    valid = TPR >= tpr_min 
+    if not np.any(valid): 
+        return None 
+    # Elegir el umbral que maximiza Q 
+    best_idx = np.argmax(Q * valid) # Q=0 para no válidos 
+    return { 'threshold': thresholds[best_idx], 'TPR': float(TPR[best_idx]), 'FPR': float(FPR[best_idx]), 'Q': float(Q[best_idx]) } 
+
+
+
+
+def graficar_metricas_vs_energia(model, X_test, y_test, energy_column, df_test, n_bins=7, carpeta=".", nombre_modelo="modelo", caso="CASO", version="v1",global_range=False): 
+    energies = df_test[energy_column].values 
+    y_proba = model.predict_proba(X_test)[:, 1] 
+    bins = np.arange(2.0, 5.5 + 0.5, 0.5) 
+    bin_centers = (bins[:-1] + bins[1:]) / 2 
+    tpr_list, fpr_list, q_list = [], [], [] 
+    
+    for i in range(n_bins): 
+        mask = (energies >= bins[i]) & (energies < bins[i + 1]) 
+        if np.sum(mask) == 0: 
+            tpr_list.append(np.nan) 
+            fpr_list.append(np.nan) 
+            q_list.append(np.nan) 
+            continue 
+        y_true_bin = y_test[mask] 
+        y_proba_bin = y_proba[mask] 
+        # --- FPR @ TPR≥0.8 (igual que figura del paper) 
+        res_thr08 = encontrar_umbral_min_fpr(y_true_bin, y_proba_bin, tpr_objetivo=0.8) 
+        if res_thr08: 
+            tpr_list.append(res_thr08["TPR"]) 
+            fpr_list.append(res_thr08["FPR"]) 
+        else: 
+            tpr_list.append(np.nan) 
+            fpr_list.append(np.nan) 
+        
+        # --- Q máximo con TPR≥0.5 (figura Q-factor del paper) 
+        
+        res_qopt = encontrar_umbral_max_q(y_true_bin, y_proba_bin, tpr_min=0.5)
+        if res_qopt: 
+            q_list.append(res_qopt["Q"]) 
+        else: 
+            q_list.append(np.nan) 
+        # Gráficos 
+    graficar_tpr_vs_energia(bin_centers, tpr_list, nombre_modelo, carpeta, caso, version) 
+    graficar_fpr_vs_energia(bin_centers, fpr_list, nombre_modelo, carpeta, caso, version) 
+    graficar_q_vs_energia(bin_centers, q_list, nombre_modelo, carpeta, caso, version) 
+
+
+
+def score_q(model, X_val, y_val, tpr_target=0.80, n_points=400): 
+    """ Calcula el Q-factor óptimo para un modelo entrenado, usando evaluación vectorizada.
+      Retorna 0 si no alcanza el TPR objetivo. """ 
+    if not hasattr(model, "predict_proba"):
+        return 0 # El modelo no permite obtener probabilidades 
+    
+    y_proba = model.predict_proba(X_val)[:, 1] 
+    res = encontrar_umbral_min_fpr( 
+        y_val, y_proba, tpr_objetivo=tpr_target, n_points=n_points 
+        ) 
+    return res["Q"] if res else 0 
+# === guardado del modelo con ambos thresholds ========================= 
+
+
+
+
+def save_bundle(model, res_08, res_05, res_qopt, path): 
+    bundle = { 
+        "model": model, 
+        "thr08": res_08["threshold"], 
+        "TPR08": res_08["TPR"], 
+        "FPR08": res_08["FPR"], 
+        "Q08": res_08["Q"], 
+        "thr05": None if res_05 is None else res_05["threshold"], 
+        "TPR05": None if res_05 is None else res_05["TPR"], 
+        "FPR05": None if res_05 is None else res_05["FPR"], 
+        "Q05": None if res_05 is None else res_05["Q"], 
+        "thrQopt": None if res_qopt is None else res_qopt["threshold"], 
+        "TPRQopt": None if res_qopt is None else res_qopt["TPR"], 
+        "FPRQopt": None if res_qopt is None else res_qopt["FPR"], 
+        "QQopt": None if res_qopt is None else res_qopt["Q"], 
+        } 
+    joblib.dump(bundle, path) 
+
+
+
+def manual_grid_search_xgb(X_train, y_train, X_val, y_val, param_grid,logger_model ,max_rounds=100, patience=20): 
+    import time 
+    start_time = time.time() 
+    logger_model.info(" Inicio de entrenamiento XGBoost") 
+    best_f1_global = -1 
+    best_model_global = None 
+    best_params_global = None 
+    
+    keys, values = zip(*param_grid.items()) 
+    
+    for combination in product(*values): 
+        params = dict(zip(keys, combination)) 
+        params.pop("n_estimators", None) 
+        best_f1 = -1 
+        no_improve_count = 0 
+        model = None 
+        
+        for round_num in range(1, max_rounds + 1): 
+            model = XGBClassifier( objective='binary:logistic',
+                                   random_state=42, 
+                                   use_label_encoder=False,
+                                     n_estimators=round_num, # ir incrementando rondas 
+                                     n_jobs=20, **params ) 
+            
+            model.fit(X_train, y_train, verbose=False) 
+            q_this = score_q(model, X_val, y_val, tpr_target=0.80) 
+            
+            if q_this > best_f1: # mejor llamado best_q 
+                best_f1 = q_this 
+                best_model = model 
+                no_improve_count = 0 
+            else: no_improve_count += 1 
+            
+            
+            if no_improve_count >= patience: 
+                print(f"Early stopping for params {params} at round {round_num}") 
+                break 
+            
+        if best_f1 > best_f1_global: 
+            best_f1_global = best_f1 
+            best_model_global = best_model 
+            best_params_global = params 
+    
+    elapsed = time.time() - start_time 
+    logger_model.info(f"  Fin de entrenamiento XGBoost (Duración: {elapsed:.2f} s)") 
+    logger_model.info(f"Mejores parámetros: {best_params_global} | Mejor Q en validación: {best_f1_global:.5f}") 
+    print(f"\nMejores parámetros para XGBoost: {best_params_global}") 
+    print(f"Mejor F1 en validación: {best_f1_global:.5f}") 
+    return best_model_global 
+
+
+
+def ejecutar_pipeline(caso, features ,version,carpeta,emin,emax,rmin=None,rmax=None): 
+    print(f"\n--- Ejecutando pipeline para: {caso} | Filtro: {version} ---\n") 
+    # === 1. Cargar y filtrar datos === 
+    data = pd.read_csv('/home/swgo_2024/RESULTADOS/ML_aerie_gamma_proton_v4.csv', sep=",") 
+    mask=(data['rec.LHLatDistFitEnergy'] > emin) & (data['rec.LHLatDistFitEnergy'] <= emax) 
+    #data=data[mask] 
+    data = data[mask] 
+    if data.empty: 
+        logging.warning(f"[{caso}-{version}] Dataset vacío después del filtro de energía.") 
+        return 
+    
+    # Aplicar filtro de distancia si rmin y rmax están definidos 
+    
+    if rmin is not None and rmax is not None: 
+        if 'rec.coreX' not in data.columns or 'rec.coreY' not in data.columns: 
+            logging.warning(f"[{caso}-{version}] Faltan columnas 'rec.coreX' o 'rec.coreY'.") 
+            return 
+        
+        r = np.sqrt(data['rec.coreX']**2 + data['rec.coreY']**2) 
+        mask = (r >= rmin) & (r < rmax) 
+        data = data[mask] 
+        
+    X=data[features]
+    y= 1 - data['Type_Particle'] #estp cambia a gamma a 1 y hadron a 0 
+    #añadir un conjunto de validacion (ok) 
