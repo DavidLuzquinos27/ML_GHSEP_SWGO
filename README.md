@@ -1,4 +1,4 @@
-# ML_GHSEP_SWGO – Gamma–hadron separation for SWGO using Machine Learning
+# Gamma–hadron separation for SWGO D8 using Machine Learning Tecniques
 
 This repository contains the code for a gamma–hadron separation study using *machine learning* techniques for the Southern Wide-field Gamma-ray Observatory (SWGO). The goal is to improve or, if possible, optimize the current results reported in the SWGO science prospects paper (https://doi.org/10.48550/arXiv.2506.01786) by employing relatively simple boosting models and physics-motivated input variables inspired by other experiments (e.g. HAWC and LHAASO).
 
