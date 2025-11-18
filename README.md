@@ -34,5 +34,4 @@ The main physics motivation and baseline expectations come from the SWGO science
 > SWGO Collaboration, *Science Prospects for the Southern Wide-field Gamma-ray Observatory: SWGO*, arXiv:2506.01786.
 
 Please cite this work if you use the ideas, code, or results from this repository.
-```
 
