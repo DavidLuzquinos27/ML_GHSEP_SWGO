@@ -1,0 +1,301 @@
+ # === 4. División entrenamiento/prueba =======================================
+    
+    X_train_val, X_test, y_train_val, y_test = train_test_split( X, y, test_size=0.2, stratify=y, random_state=42 ) 
+    # Guardar índices del test antes de escalar 
+    test_indices = X_test.index 
+    
+    # Luego dividimos entrenamiento+validación en entrenamiento y validación 
+    X_train, X_val, y_train, y_val = train_test_split( X_train_val, y_train_val, test_size=0.25, stratify=y_train_val, random_state=42 ) 
+    df_test = data.loc[test_indices].copy() 
+    
+    # === 5. Escalar === 
+    scaler = StandardScaler() 
+    X_train = scaler.fit_transform(X_train) 
+    X_test = scaler.transform(X_test) 
+    X_val= scaler.transform(X_val) 
+    # Convertir X_train escalado a DataFrame con nombres de columnas 
+    # Volvemos a DataFrame para poder aplicar la función variable por variable 
+    
+    X_train_df = pd.DataFrame(X_train, columns=features) 
+    y_train_series = pd.Series(y_train).reset_index(drop=True) 
+    X_train_discretized = X_train_df.copy() 
+    for col in X_train_df.columns: 
+        X_train_discretized[col] = pd.qcut(X_train_df[col], q=10, duplicates='drop') 
+    
+    
+    def gini_index(feature, target): 
+        df = pd.DataFrame({'feature': feature, 'target': target}) 
+        gini_total = 0 
+        values = df['feature'].unique() 
+        
+        for v in values: 
+            subset = df[df['feature'] == v] 
+            size = len(subset) 
+        
+            if size == 0: 
+                continue 
+            p = subset['target'].value_counts(normalize=True) 
+            gini = 1 - np.sum(p**2) 
+            gini_total += (size / len(df)) * gini 
+        return gini_total 
+    
+    # Calcular Gini para cada variable 
+    """gini_scores = { col: gini_index(X_train_discretized[col],
+      y_train_series) for col in X_train_discretized.columns } 
+      gini_df = pd.DataFrame.from_dict(gini_scores, 
+      orient='index', columns=['GiniIndex']) 
+      gini_df = gini_df.sort_values(by='GiniIndex', 
+      ascending=True) 
+      print(gini_df) 
+    """ 
+    # === 6. Modelos y parámetros para RandomizedSearch === 
+    lgbm = LGBMClassifier(objective='binary',random_state=42,force_col_wise=True,n_jobs=20)#, metric='logloss') 
+    lgbm_params = { 
+        'n_estimators': [100, 300, 500], 
+        'learning_rate': [0.01, 0.05, 0.1], 
+        'max_depth': [3, 6, 8, 10], 
+        'num_leaves': [20, 31, 50] } 
+    # 
+    #xgb = XGBClassifier(objective='binary:logistic', random_state=42, eval_metric='logloss') 
+    xgb_params = { 
+        'n_estimators': [100, 300, 500], 
+        'learning_rate': [0.01, 0.05, 0.1], 
+        'max_depth': [3, 6, 8, 10], 
+        'subsample': [0.7, 0.8, 1.0] 
+    } 
+    
+    cat = CatBoostClassifier(loss_function='Logloss', random_state=42, verbose=0,thread_count=20) 
+    cat_params = { 
+        'iterations': [100, 300, 500], 
+        'learning_rate': [0.01, 0.05, 0.1], 
+        'depth': [3, 6, 8, 10] 
+    } 
+    #añadir el early stopping round 
+    # === 7. Función para búsqueda con early stopping === 
+    # 
+    from copy import deepcopy 
+    def grid_search_with_early_stopping(model, params, name,logger_model): 
+        import time 
+        start_time = time.time() 
+        logger_model.info(f"  Inicio de entrenamiento {name}") 
+        best_score = -1 
+        best_model = None 
+        best_params = None 
+        from itertools import product 
+        
+        # Guardar la clase del modelo original 
+        model_class = type(model) 
+        base_params = model.get_params() 
+        keys = list(params.keys()) 
+        values = list(params.values()) 
+        
+        for combination in product(*values): 
+            param_dict = dict(zip(keys, combination)) 
+            # Crear nueva instancia del modelo con los parámetros combinados 
+            new_params = {**base_params, **param_dict} 
+            current_model = model_class(**new_params) 
+            
+    # if name == "XGBoost": 
+        # current_model.fit(X_train, y_train, 
+        # eval_set=[(X_val, y_val)], 
+        # early_stopping_rounds=20, 
+        # verbose=False # ) 
+            if name == "LightGBM": 
+                current_model.fit(X_train, y_train,
+                                   eval_set=[(X_val, y_val)], 
+                                   eval_metric='logloss', 
+                                   callbacks=[early_stopping(stopping_rounds=20),log_evaluation(0)], 
+                                   ) 
+            elif name == "CatBoost": 
+                current_model.fit(X_train, y_train,
+                                   eval_set=(X_val, y_val), 
+                                   early_stopping_rounds=20, 
+                                   verbose=0) 
+                
+            
+            score = score_q(current_model, X_val, y_val, tpr_target=0.80) 
+            if score > best_score: 
+                best_score = score 
+                best_model = current_model 
+                best_params = param_dict 
+        
+        elapsed = time.time() - start_time 
+        
+        logger_model.info(f"  Fin de entrenamiento {name} (Duración: {elapsed:.2f} s)") 
+        logger_model.info(f"Mejores parámetros: {best_params} | Mejor Q en validación: {best_score:.5f}") 
+        
+        
+        print(f"\nMejores parámetros para {name}: {best_params}") 
+        print(f"Mejor Q en validación: {best_score:.5f}") 
+        return best_model 
+    
+    
+    # Buscar mejores modelos 
+    print("\n----- Buscando hiperparámetros (Grid Search + Early Stopping) -----\n") 
+    
+    
+    best_lgbm = grid_search_with_early_stopping(lgbm, lgbm_params, "LightGBM",logger_lgbm) 
+    best_xgb = manual_grid_search_xgb(X_train, y_train, X_val, y_val, xgb_params,logger_xgb) 
+    best_cat = grid_search_with_early_stopping(cat, cat_params, "CatBoost",logger_cat) 
+
+
+
+    # === 8. Evaluación función === 
+    # def encontrar_umbral_para_tpr(y_true, y_proba, tpr_objetivo=0.8): 
+    # thresholds = np.linspace(0.1, 1.0, 200) # best = None 
+    # for thr in thresholds: 
+    # y_pred = (y_proba >=thr).astype(int) 
+    # tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel() 
+    # if (tp + fn) == 0 or (fp + tn) == 0: 
+    # continue # tpr = tp / (tp + fn) 
+    # fpr = fp / (fp + tn) # if tpr >= tpr_objetivo: 
+    # q = tpr / np.sqrt(fpr) if fpr > 0 else 0 
+    # if best is None or q > best["Q"]: 
+    # **maximiza Q** 
+    # best = {"threshold": thr, "TPR": tpr, "FPR": fpr, "Q": q} 
+    # return best 
+    
+    
+    
+    def evaluate_model(model, name, X_test, y_test, df_test, carpeta, caso, version): 
+        resultado = None 
+        preds = model.predict(X_test) 
+        report = classification_report(y_test, preds, digits=5) 
+        matrix = confusion_matrix(y_test, preds, labels=[0, 1]) 
+        output = f"\n===== {name} =====\n" 
+        output += report + "\n" 
+        output += "Matriz de confusión:\n" + str(matrix) + "\n" 
+        
+        
+        # === Análisis adicional con predict_proba === 
+        # === Evaluación TPR ≥ 0.8 === 
+        if hasattr(model, "predict_proba"): 
+            y_proba = model.predict_proba(X_test)[:, 1] 
+            # clase 1 = gamma 
+            resultado = encontrar_umbral_min_fpr(y_test, y_proba, tpr_objetivo=0.8) 
+            if resultado: 
+                thr = resultado["threshold"] 
+                y_pred_thr = (y_proba >= thr).astype(int) 
+                matrix_thr = confusion_matrix(y_test, y_pred_thr, labels=[0, 1]) 
+                report_thr = classification_report(y_test, y_pred_thr, digits=5) 
+                output += "\n--- Umbral optimizado para TPR ≥ 0.8 ---\n" 
+                output += f"Threshold: {resultado['threshold']:.3f}\n" 
+                output += f"TPR (ε_γ): {resultado['TPR']:.3f}\n" 
+                output += f"FPR (ε_p): {resultado['FPR']:.3f}\n" 
+                output += f"Q-factor: {resultado['Q']:.3f}\n" 
+                output += "\nMatriz de confusión (thr óptimo):\n" + str(matrix_thr) + "\n" 
+                output += report_thr + "\n" 
+                
+            else: 
+                output += "\n--- No se encontró umbral con TPR ≥ 0.8 ---\n" 
+            # === Evaluación adicional para TPR ≥ 0.5 (comparación con Glombitza fig. 9) === 
+            
+            resultado_05 = encontrar_umbral_min_fpr(y_test, y_proba, tpr_objetivo=0.5) 
+            if resultado_05: 
+                output += "\n--- Umbral alternativo para TPR ≥ 0.5 (comparación paper) ---\n" 
+                output += f"Threshold (TPR≥0.5): {resultado_05['threshold']:.3f}\n" 
+                output += f"TPR (ε_γ): {resultado_05['TPR']:.3f}\n" 
+                output += f"FPR (ε_p): {resultado_05['FPR']:.3f}\n" 
+                output += f"Q-factor: {resultado_05['Q']:.3f}\n" 
+            
+            # === Q-factor optimizado con TPR >= 0.5 === 
+            resultado_qopt = encontrar_umbral_max_q(y_test, y_proba, tpr_min=0.5) 
+            
+            if resultado_qopt: 
+                thr_qopt = resultado_qopt['threshold'] 
+                y_pred_qopt = (y_proba >= thr_qopt).astype(int) 
+                # Matriz y reporte 
+                matrix_qopt = confusion_matrix(y_test, y_pred_qopt, labels=[0, 1]) 
+                report_qopt = classification_report(y_test, y_pred_qopt, digits=5) 
+                output += "\n--- Umbral que maximiza Q con TPR ≥ 0.5 ---\n" 
+                output += f"Threshold: {resultado_qopt['threshold']:.3f}\n" 
+                output += f"TPR (ε_γ): {resultado_qopt['TPR']:.3f}\n" 
+                output += f"FPR (ε_p): {resultado_qopt['FPR']:.3f}\n" 
+                output += f"Q-factor: {resultado_qopt['Q']:.3f}\n" 
+                output += "\nMatriz de confusión (Q-opt):\n" + str(matrix_qopt) + "\n" 
+                output += report_qopt + "\n" 
+            
+            # Guardar matriz óptima como heatmap 
+            plt.figure(figsize=(5, 4)) 
+            sns.heatmap(matrix_thr, annot=True, 
+                        fmt='d', 
+                        cmap="Blues", 
+                        xticklabels=["Hadron (0)", "Gamma (1)"], 
+                        yticklabels=["Hadron (0)", "Gamma (1)"]) 
+            plt.xlabel('Predicción') 
+            plt.ylabel('Verdadero') 
+            plt.title(f'Matriz óptima - {name} (thr={thr:.3f})') 
+            plt.tight_layout() 
+            plt.savefig(f'{carpeta}/confusion_matrix_opt_{name}_{caso}_{version}.png', dpi=600) 
+            plt.close() 
+            # === Generar gráfico TPR/FPR vs energía === 
+            graficar_metricas_vs_energia( 
+                model=model, 
+                X_test=X_test, 
+                y_test=y_test, 
+                energy_column="rec.LHLatDistFitEnergy", 
+                df_test=df_test, # Asegúrate que esté disponible y alineado 
+                n_bins=7, 
+                #threshold=resultado['threshold'], 
+                # usar el umbral óptimo 
+                carpeta=carpeta, 
+                nombre_modelo=name, 
+                caso=caso, 
+                version=version ) 
+        else: 
+            output += "\n--- Modelo no soporta predict_proba ---\n" 
+        
+        # Imprimir en consola y guardar en archivo 
+        print(output) 
+        with open(f"{carpeta}/evaluacion_matriz_{name}_{caso}_{version}.txt", 'w') as f: 
+            f.write(output) 
+        # ---- guardar modelo + thresholds --------------------------------
+        
+        if resultado: # solo si existe TPR≥0.8 
+            # nombre base del archivo 
+            
+            pkl_name = { 
+                'LightGBM': 'best_lgbm_with_thr.pkl', 
+                'XGBoost': 'best_xgb_with_thr.pkl', 
+                'CatBoost': 'best_cat_with_thr.pkl', 
+                'VotingClassifier (Soft Voting)': 'voting_classifier_with_thr.pkl' 
+                }[name] 
+            save_bundle(model, resultado, resultado_05,resultado_qopt, f"{carpeta}/{pkl_name}") 
+            
+        # --------------------------------------------------------------- 
+        return resultado 
+    def plot_confusion_matrices(models, model_names, X_test, y_test, labels=None): 
+        for model, name in zip(models, model_names): 
+            y_pred = model.predict(X_test) 
+            cm = confusion_matrix(y_test, y_pred, labels=labels) 
+            f1 = f1_score(y_test, y_pred) 
+            precision = precision_score(y_test, y_pred) 
+            recall = recall_score(y_test, y_pred) 
+            plt.figure(figsize=(6, 5)) 
+            sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", 
+                        xticklabels=labels if labels else 'auto', 
+                        yticklabels=labels if labels else 'auto') 
+            plt.xlabel('Predicción') 
+            plt.ylabel('Verdadero') 
+            plt.title(f'Matriz de Confusión - {name}-{caso}\n' 
+                      f'F1: {f1:.3f} | Precisión: {precision:.3f} | Recall: {recall:.3f}') 
+            plt.tight_layout() 
+            filename = f'{carpeta}/confusion_matrix_{name}_{caso}_{version}.png' 
+            plt.savefig(filename, dpi=600) 
+            plt.close() 
+    # === 9. Votación simple === 
+    voting = VotingClassifier( 
+        estimators=[ 
+            ('lgbm', best_lgbm), 
+            ('xgb', best_xgb), 
+            ('cat', best_cat) 
+            ], 
+            voting='soft', 
+            n_jobs=20 
+            ) 
+    start_voting = time.time() 
+    logger_voting.info("Inicio de entrenamiento VotingClassifier") 
+    voting.fit(X_train, y_train) 
+    elapsed_voting = time.time() - start_voting 
+    
+    logger_voting.info(f"Fin de entrenamiento VotingClassifier (Duración: {elapsed_voting:.2f} s)") 
