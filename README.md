@@ -27,6 +27,10 @@ The main focus of the project is:
 - `configs/` – configuration files for experiments (features, hyperparameters, splits – to be implemented).  
 - `results/` – metrics, tables, and figures for the different runs.
 
+## Presentation on Collaboration Meeting
+- Gamma Hadron Separation using Machine Learning Techniques in SWGO D8 Array:
+- https://www.swgo.org/SWGOWiki/lib/exe/fetch.php?media=ml_swgo_d8_acolan_dluzquinos_jbazo.pdf
+
 ## Reference
 
 The main physics motivation and baseline expectations come from the SWGO science prospects paper:
