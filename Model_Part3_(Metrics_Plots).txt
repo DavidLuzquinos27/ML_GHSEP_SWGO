@@ -1,0 +1,169 @@
+ # Evaluación individual con thresholds (TXT y métricas) 
+    
+    evaluate_model(best_lgbm, "LightGBM", X_test, y_test, df_test, carpeta, caso, version) 
+    evaluate_model(best_xgb, "XGBoost", X_test, y_test, df_test, carpeta, caso, version) 
+    evaluate_model(best_cat, "CatBoost", X_test, y_test, df_test, carpeta, caso, version) 
+    res_voting = evaluate_model(voting, "VotingClassifier (Soft Voting)", X_test, y_test, df_test, carpeta, caso, version) 
+    
+    if res_voting: 
+        bundle = { 
+            "model": voting, 
+            "threshold": res_voting["threshold"], 
+            "TPR": res_voting["TPR"], 
+            "FPR": res_voting["FPR"], 
+            "Q": res_voting["Q"] 
+        } 
+        joblib.dump(bundle, f"{carpeta}/voting_classifier_with_thr.pkl") 
+        
+    plot_confusion_matrices( 
+        models=[best_lgbm, best_xgb, best_cat,voting], 
+        model_names=['LightGBM', 'XGBoost', 'CatBoost','VotingClassifier'], 
+        X_test=X_test, 
+        y_test=y_test, 
+        labels=[0, 1], 
+    ) 
+    
+    # === 10. Curvas ROC y Gini === 
+    def plot_roc(models, names): 
+        plt.figure(figsize=(10, 8)) 
+        for model, name in zip(models, names): 
+            y_proba = model.predict_proba(X_test)[:, 1] 
+            fpr, tpr, _ = roc_curve(y_test, y_proba) 
+            roc_auc = auc(fpr, tpr) 
+            gini = 2 * roc_auc - 1 
+            plt.plot(fpr, tpr, label=f'{name}-{caso} (Gini = {gini:.3f})') 
+        plt.plot([0, 1], [0, 1], 'k--', lw=2) 
+        plt.xlabel('False Positive Rate') 
+        plt.ylabel('True Positive Rate') 
+        plt.title('Curvas ROC / Índice de Gini', fontsize=14) 
+        plt.legend(loc="lower right") 
+        plt.grid() 
+        
+        # Guardar la figura con nombre más neutral 
+        
+        plt.savefig(f"{carpeta}/Curvas_ROC_Gini_{caso}_{version}.png", dpi=600, bbox_inches='tight') 
+        
+        plt.close() 
+    # Ejecutar la función 
+    plot_roc( 
+        [best_lgbm, best_xgb, best_cat,voting], 
+        ['LightGBM', 'XGBoost', 'CatBoost','Voting'] 
+        ) 
+    
+    def check_probability_calibration(models, names): 
+        for model, name in zip(models, names): 
+            y_proba = model.predict_proba(X_test)[:, 1] 
+            mean_proba = np.mean(y_proba) 
+            mean_true = np.mean(y_test) 
+            print(f"{name}:") 
+            print(f" Promedio de y_proba: {mean_proba:.4f}") 
+            print(f" Promedio real (y_test): {mean_true:.4f}") 
+            print(f" Diferencia absoluta: {abs(mean_proba - mean_true):.4f}\n") 
+    # Ejecutar la función 
+    
+    check_probability_calibration( 
+        [best_lgbm, best_xgb, best_cat], 
+        ['LightGBM', 'XGBoost', 'CatBoost'] 
+        ) 
+    #lgbm: gain 
+    #xgboost: gain 
+    #catboost: gini 
+    #usar el gini para los tres para que esté standarizado, rango estimado(buscar) 
+    # === 11. Importancia de características === 
+    
+    def plot_feature_importances(model, name, feature_names): 
+        if hasattr(model, 'feature_importances_'): 
+            importances = model.feature_importances_ 
+            indices = np.argsort(importances)[::-1] 
+            plt.figure(figsize=(10,6)) 
+            plt.title(f'Importancia de variables-{caso}') 
+            sns.barplot(x=importances[indices], y=np.array(feature_names)[indices]) 
+            plt.tight_layout() 
+            plt.savefig(f'{carpeta}/feature_importance_V2_{name}_{caso}_{version}.png', dpi=600) 
+            plt.close() 
+    
+    
+    print("\n--- Importancia de características ---\n") 
+    plot_feature_importances(best_lgbm, 'LightGBM', features) 
+    plot_feature_importances(best_xgb, 'XGBoost', features) 
+    plot_feature_importances(best_cat, 'CatBoost', features) 
+    
+    # === 12. Calculo de Gini === 
+    def plot_feature_importance_gini(model, feature_names,name ,top_n=20): 
+        # Obtener importancias 
+        importances = model.feature_importances_ 
+        df_importance = pd.DataFrame({ 
+            'Feature': feature_names, 
+            'GiniImportance': importances 
+            }).sort_values(by='GiniImportance', ascending=False).head(top_n) 
+        # Gráfico de barras 
+        plt.figure(figsize=(10, 6)) 
+        plt.barh(df_importance['Feature'][::-1], 
+                 df_importance['GiniImportance'][::-1], 
+                 color='skyblue') 
+        plt.xlabel('Importancia tipo Gini') 
+        plt.title(f'Top {top_n} características más importantes según Gini-{caso}') 
+        plt.grid(axis='x') 
+        plt.tight_layout() 
+        plt.savefig(f'{carpeta}/feature_importance_gini_V2_{name}_{caso}_{version}.png', dpi=600) 
+        plt.close() 
+    
+    plot_feature_importance_gini(best_lgbm, features,"lgbm") 
+    plot_feature_importance_gini(best_xgb,features,"xgb") 
+    plot_feature_importance_gini(best_cat,features,"cat") 
+    
+    # Guardar los modelos 
+    # joblib.dump(best_lgbm, f'{carpeta}/best_lgbm_model_V2.pkl') 
+    # joblib.dump(best_xgb, f'{carpeta}/best_xgb_model_V2.pkl') 
+    # joblib.dump(best_cat, f'{carpeta}/best_cat_model_V2.pkl') 
+    # joblib.dump(voting, f'{carpeta}/voting_classifier_V2.pkl') 
+    
+    print("Modelos guardados exitosamente.") 
+with open("feature_sets_p2.json", "r") as f: 
+    feature_sets = json.load(f) 
+rangos_energia = [ 
+        (f"version_1_5TeV_{muestra}", 2.0, 2.5), 
+        (f"version_5_10TeV_{muestra}", 2.5, 3.0), 
+        (f"version_10-15TeV_{muestra}", 3.0, 3.5), 
+        (f"version_15_20TeV_{muestra}", 3.5, 4.0), 
+        (f"version_20_25TeV_{muestra}", 4.0, 4.5), 
+        (f"version_25_30TeV_{muestra}", 4.5, 5.0), 
+        (f"version_30_35TeV_{muestra}", 5.0, 5.5) 
+        # (f"version_60_65TeV_{muestra}", (60000), (65000)), 
+        # (f"version_65-70TeV_{muestra}", (65000), (70000)), 
+        # (f"version_70_75TeV_{muestra}", (70000), (75000)), 
+        # (f"version_75_80TeV_{muestra}", (75000), (80000)), 
+        # (f"version_80_85TeV_{muestra}", (80000), (85000)), 
+        # (f"version_85_90TeV_{muestra}", (85000), (90000)) 
+        ] 
+rango_radio =[ 
+        ("r_0_156m",0,156), 
+        ("r_156_400m",156,400), 
+        ("r_400_560m",400,560), 
+        ("r_560_570m",560,570), 
+        ("r_570_580m",570,580) 
+        ] 
+for num, config in feature_sets.items(): 
+    nombre = config["nombre"] 
+    features = config["features"] 
+    logger.info(f"Iniciando feature set {num} – {nombre}") 
+    for energia_nombre,emin,emax in rangos_energia: 
+        for radio_nombre,rmin, rmax in rango_radio: 
+            version =f"{energia_nombre}_{radio_nombre}" 
+            carpeta = f"{num}_{muestra}/{version}" 
+            os.makedirs(carpeta, exist_ok=True) 
+            logger.info(f" ↳ Empieza versión {version}") 
+            try: 
+                ejecutar_pipeline( 
+                    nombre, 
+                    features, 
+                    version, 
+                    carpeta, 
+                    emin=emin, 
+                    emax=emax, 
+                    rmin=rmin, 
+                    rmax=rmax ) 
+                logger.info(f" Versión {carpeta} COMPLETADA") 
+            except Exception: 
+                logger.exception(f" Versión {carpeta} FALLÓ (ver traza)")
+    
