@@ -1,4 +1,4 @@
-ort pandas as pd
+import pandas as pd
 
 # Cargado de archivos
 df1 = pd.read_parquet("ML_gamma_v2.parquet")
